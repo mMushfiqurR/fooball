@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arena Strikers: Fixed Bounds</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #101012;
+            color: white;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+            user-select: none;
+        }
+        
+        #game-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 30px;
+            background: #16161a;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 15px 40px rgba(0,0,0,0.5);
+            border: 1px solid #25252b;
+        }
+
+        #sidebar {
+            width: 180px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .panel-box {
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid #25252b;
+            padding: 12px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .score-title {
+            font-size: 11px;
+            color: #777;
+            letter-spacing: 1px;
+            margin-bottom: 3px;
+        }
+
+        .score-value {
+            font-size: 40px;
+            font-weight: 900;
+        }
+        
+        #p-score { color: #00bfff; }
+        #a-score { color: #ff4500; }
+
+        canvas {
+            border: 3px solid #3a3a42;
+            border-radius: 6px;
+            background-color: #145a2d;
+            cursor: none;
+        }
+
+        #instructions {
+            font-size: 11px;
+            color: #555;
+            line-height: 1.5;
+        }
+        strong { color: #888; }
+    </style>
+</head>
+<body>
+
+    <div id="game-wrapper">
+        
+        <div id="sidebar">
+            <div class="panel-box">
+                <div style="font-weight: bold; font-size: 14px; color: #888;">ARENA CUP</div>
+            </div>
+
+            <div class="panel-box">
+                <div class="score-title">YOUR SCORE</div>
+                <div id="p-score" class="score-value">0</div>
+            </div>
+
+            <div class="panel-box">
+                <div class="score-title">AI SCORE</div>
+                <div id="a-score" class="score-value">0</div>
+            </div>
+
+            <div id="instructions">
+                <strong>Controls:</strong><br>
+                • Move <b>Mouse</b> to glide.<br>
+                • <b>Click</b> or <b>Spacebar</b> to trigger your <b>Power Dash Kick</b>!
+            </div>
+        </div>
+
+        <canvas id="arena" width="460" height="680"></canvas>
+
+    </div>
+
+    <script>
+        const canvas = document.getElementById("arena");
+        const ctx = canvas.getContext("2d");
+
+        let scores = { player: 0, ai: 0 };
+        
+        // Scaled layout parameters with dedicated safety padding inside canvas
+        const padY = 60; // Field boundary line starts 60px down inside canvas view
+        const goalWidth = 140;
+        const goalHeight = 25; 
+        const goalX = (canvas.width - goalWidth) / 2;
+
+        let goalFlash = 0;
+        let ballTrail = [];
+
+        // Entity models
+        const ball = { x: 230, y: 340, vx: 0, vy: 0, radius: 11, mass: 1, color: "#ffffff" };
+        
+        const player = { 
+            x: 230, y: 500, vx: 0, vy: 0, radius: 21, mass: 4, color: "#00bfff",
+            targetX: 230, targetY: 500, isDashing: false, dashTimer: 0
+        };
+
+        const ai = { 
+            x: 230, y: 180, vx: 0, vy: 0, radius: 21, mass: 4, color: "#ff4500",
+            baseSpeed: 3.5,
+            reactionDelay: 0.10,
+            state: "defend"
+        };
+
+        const friction = 0.982;
+        const dashCooldownMax = 45; 
+        let dashCooldown = 0;
+
+        window.addEventListener("mousemove", (e) => {
+            const rect = canvas.getBoundingClientRect();
+            let mx = e.clientX - rect.left;
+            let my = e.clientY - rect.top;
+            
+            player.targetX = Math.min(Math.max(mx, player.radius), canvas.width - player.radius);
+            // Confined perfectly between center line and bottom baseline
+            player.targetY = Math.min(Math.max(my, canvas.height / 2 + player.radius), canvas.height - padY - player.radius);
+        });
+
+        const triggerDash = () => {
+            if (dashCooldown > 0 || player.isDashing) return;
+            player.isDashing = true;
+            player.dashTimer = 7; 
+            dashCooldown = dashCooldownMax;
+        };
+
+        window.addEventListener("mousedown", triggerDash);
+        window.addEventListener("keydown", (e) => { if (e.code === "Space") triggerDash(); });
+
+        function resolveCollisions(c1, c2, dynamicKick = false) {
+            let dx = c2.x - c1.x;
+            let dy = c2.y - c1.y;
+            let dist = Math.hypot(dx, dy);
+            let minDist = c1.radius + c2.radius;
+
+            if (dist < minDist) {
+                let angle = Math.atan2(dy, dx);
+                let overlap = minDist - dist;
+
+                c1.x -= Math.cos(angle) * overlap * 0.5;
+                c1.y -= Math.sin(angle) * overlap * 0.5;
+                c2.x += Math.cos(angle) * overlap * 0.5;
+                c2.y += Math.sin(angle) * overlap * 0.5;
+
+                let nx = dx / dist;
+                let ny = dy / dist;
+                let kx = c1.vx - c2.vx;
+                let ky = c1.vy - c2.vy;
+                let impulse = 2 * (nx * kx + ny * ky) / (c1.mass + c2.mass);
+
+                c1.vx -= impulse * c2.mass * nx;
+                c1.vy -= impulse * c2.mass * ny;
+                c2.vx += impulse * c1.mass * nx;
+                c2.vy += impulse * c1.mass * ny;
+
+                if (dynamicKick) {
+                    c2.vx += Math.cos(angle) * 13;
+                    c2.vy += Math.sin(angle) * 13;
+                }
+            }
+        }
+
+        function resetPositions() {
+            ball.x = canvas.width / 2; ball.y = canvas.height / 2; ball.vx = 0; ball.vy = 0;
+            ai.x = canvas.width / 2; ai.y = padY + 40; ai.vx = 0; ai.vy = 0;
+            ballTrail = [];
+        }
+
+        function update() {
+            let prevX = player.x;
+            let prevY = player.y;
+
+            if (player.isDashing) {
+                let dx = player.targetX - player.x;
+                let dy = player.targetY - player.y;
+                let angle = Math.atan2(dy, dx);
+                player.x += Math.cos(angle) * 22;
+                player.y += Math.sin(angle) * 22;
+                player.dashTimer--;
+                if (player.dashTimer <= 0) player.isDashing = false;
+            } else {
+                player.x += (player.targetX - player.x) * 0.35;
+                player.y += (player.targetY - player.y) * 0.35;
+            }
+
+            player.vx = player.x - prevX;
+            player.vy = player.y - prevY;
+
+            // --- INTUITIVE ANTI-CORNER STUCK AI MODIFICATIONS ---
+            let aiTargetX = canvas.width / 2;
+            let aiTargetY = padY + 30;
+
+            // Define corner zones
+            let inCorner = (ball.x < 60 || ball.x > canvas.width - 60) && (ball.y < padY + 60);
+
+            if (inCorner) {
+                // If ball is stuck in corner, AI backs out to center line to leave space for player's hit
+                ai.state = "backing_off";
+                aiTargetX = canvas.width / 2;
+                aiTargetY = canvas.height / 2 - 50;
+            } else if (ball.y > canvas.height / 2) {
+                ai.state = "defend";
+                aiTargetX = canvas.width / 2 + (ball.x - canvas.width / 2) * 0.5;
+                aiTargetY = padY + 30;
+            } else {
+                ai.state = "attack";
+                aiTargetX = ball.x;
+                aiTargetY = ball.y + 10;
+            }
+
+            let aiDx = aiTargetX - ai.x;
+            let aiDy = aiTargetY - ai.y;
+            let aiAngle = Math.atan2(aiDy, aiDx);
+            
+            ai.vx += (Math.cos(aiAngle) * ai.baseSpeed - ai.vx) * ai.reactionDelay;
+            ai.vy += (Math.sin(aiAngle) * ai.baseSpeed - ai.vy) * ai.reactionDelay;
+
+            ai.x += ai.vx;
+            ai.y += ai.vy;
+
+            // Constraint boundaries inside field lines
+            ai.y = Math.min(Math.max(ai.y, padY + ai.radius), canvas.height / 2 - ai.radius);
+            ai.x = Math.min(Math.max(ai.x, ai.radius), canvas.width - ai.radius);
+
+            // Ball simulation updates
+            ball.vx *= friction;
+            ball.vy *= friction;
+            ball.x += ball.vx;
+            ball.y += ball.vy;
+
+            ballTrail.push({ x: ball.x, y: ball.y });
+            if (ballTrail.length > 5) ballTrail.shift();
+
+            resolveCollisions(player, ball, player.isDashing);
+            resolveCollisions(ai, ball, false);
+            resolveCollisions(player, ai);
+
+            if (dashCooldown > 0) dashCooldown--;
+
+            // --- PADDING BOUNDARY COLLISIONS ---
+            if (ball.x - ball.radius < 0) { ball.x = ball.radius; ball.vx *= -0.8; }
+            if (ball.x + ball.radius > canvas.width) { ball.x = canvas.width - ball.radius; ball.vx *= -0.8; }
+
+            // Top Goal Line (AI Net)
+            if (ball.y - ball.radius < padY) {
+                if (ball.x > goalX && ball.x < goalX + goalWidth) {
+                    scores.player++;
+                    document.getElementById("p-score").innerText = scores.player;
+                    goalFlash = 10;
+                    resetPositions();
+                } else {
+                    ball.y = padY + ball.radius; ball.vy *= -0.8;
+                }
+            }
+
+            // Bottom Goal Line (Player Net)
+            if (ball.y + ball.radius > canvas.height - padY) {
+                if (ball.x > goalX && ball.x < goalX + goalWidth) {
+                    scores.ai++;
+                    document.getElementById("a-score").innerText = scores.ai;
+                    goalFlash = 10;
+                    resetPositions();
+                } else {
+                    ball.y = canvas.height - padY - ball.radius; ball.vy *= -0.8;
+                }
+            }
+
+            if (goalFlash > 0) goalFlash--;
+        }
+
+        function drawPitch() {
+            // Field patterns background
+            ctx.fillStyle = "#1b7a3e";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.fillStyle = "#156331";
+            for(let i = padY; i < canvas.height - padY; i += 60) {
+                if((Math.floor((i - padY)/60)) % 2 === 0) ctx.fillRect(0, i, canvas.width, 60);
+            }
+
+            // White field line trims
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+            ctx.lineWidth = 4;
+            ctx.strokeRect(0, padY, canvas.width, canvas.height - (padY * 2));
+
+            // Midfield line
+            ctx.beginPath();
+            ctx.moveTo(0, canvas.height / 2);
+            ctx.lineTo(canvas.width, canvas.height / 2);
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(canvas.width / 2, canvas.height / 2, 70, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Inner Goal Boxes (shifted inward, fully visible inside padding zones)
+            ctx.fillStyle = "rgba(0,0,0,0.6)";
+            ctx.fillRect(goalX, padY - goalHeight, goalWidth, goalHeight);
+            ctx.fillRect(goalX, canvas.height - padY, goalWidth, goalHeight);
+            
+            ctx.lineWidth = 4;
+            ctx.strokeStyle = "#ff4500"; 
+            ctx.strokeRect(goalX, padY - goalHeight, goalWidth, goalHeight); // AI
+            
+            ctx.strokeStyle = "#00bfff"; 
+            ctx.strokeRect(goalX, canvas.height - padY, goalWidth, goalHeight); // Player
+        }
+
+        function drawEntity(obj, outlineColor = "#ffffff") {
+            ctx.beginPath();
+            ctx.arc(obj.x, obj.y, obj.radius, 0, Math.PI * 2);
+            ctx.fillStyle = obj.color;
+            ctx.fill();
+            ctx.strokeStyle = outlineColor;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+
+        function drawHUD() {
+            if (dashCooldown > 0) {
+                let percentage = (dashCooldownMax - dashCooldown) / dashCooldownMax;
+                ctx.beginPath();
+                ctx.arc(player.x, player.y, player.radius + 6, -Math.PI / 2, (-Math.PI / 2) + (Math.PI * 2 * percentage));
+                ctx.strokeStyle = "#00d2ff";
+                ctx.lineWidth = 3;
+                ctx.stroke();
+            }
+        }
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            drawPitch();
+
+            // Motion Blur Trail Rendering
+            if (Math.hypot(ball.vx, ball.vy) > 2) {
+                for (let i = 0; i < ballTrail.length; i++) {
+                    let ratio = (i + 1) / ballTrail.length;
+                    ctx.beginPath();
+                    ctx.arc(ballTrail[i].x, ballTrail[i].y, ball.radius * ratio, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(255, 255, 255, ${ratio * 0.2})`;
+                    ctx.fill();
+                }
+            }
+
+            drawEntity(player, player.isDashing ? "#ffff00" : "#ffffff");
+            drawEntity(ai, "#ffffff");
+            drawEntity(ball, "#222222");
+
+            drawHUD();
+
+            if (goalFlash > 0) {
+                ctx.fillStyle = `rgba(255, 255, 255, ${goalFlash / 10})`;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+        }
+
+        function loop() {
+            update();
+            render();
+            requestAnimationFrame(loop);
+        }
+
+        loop();
+    </script>
+</body>
+</html>
